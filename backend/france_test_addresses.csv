@@ -1,0 +1,11 @@
+search_term,label,name,postcode,city,context,type,importance,longitude,latitude,target_terrain,classified_terrain
+Concarneau,Concarneau,Concarneau,29900,Concarneau,"29, Finistère, Bretagne",municipality,0.44232,-3.896018,47.891735,0,IIIa
+Toulon,Toulon 87130 Saint-Méard,Toulon,87130,Saint-Méard,"87, Haute-Vienne, Nouvelle-Aquitaine",locality,0.27527,1.544292,45.65026,0,II
+Cévennes,Rue des Cevennes 13140 Miramas,Rue des Cevennes,13140,Miramas,"13, Bouches-du-Rhône, Provence-Alpes-Côte d'Azur",street,0.63293,4.995853,43.587893,II,IV
+Sologne,Rue de Sologne 68270 Wittenheim,Rue de Sologne,68270,Wittenheim,"68, Haut-Rhin, Grand Est",street,0.59247,7.325302,47.818788,II,IV
+Lozère,Rue de Lozere 76800 Saint-Étienne-du-Rouvray,Rue de Lozere,76800,Saint-Étienne-du-Rouvray,"76, Seine-Maritime, Normandie",street,0.5493,1.098662,49.371947,IIIa,IV
+Val de Loire,Rue du Val de Loire 44370 Loireauxence,Rue du Val de Loire,44370,Loireauxence,"44, Loire-Atlantique, Pays de la Loire",street,0.54402,-1.026009,47.384892,IIIa,IV
+Charleville-Mézières,Rue Monge 08000 Charleville-Mézières,Rue Monge,08000,Charleville-Mézières,"08, Ardennes, Grand Est",street,0.66947,4.71748,49.760677,IIIb,IV
+Liévin,Rue Cayet 62800 Liévin,Rue Cayet,62800,Liévin,"62, Pas-de-Calais, Hauts-de-France",street,0.65522,2.772858,50.427287,IIIb,IV
+Strasbourg,Rue de Strasbourg 72100 Le Mans,Rue de Strasbourg,72100,Le Mans,"72, Sarthe, Pays de la Loire",street,0.71749,0.23244,47.974342,IV,IV
+Bordeaux,Bordeaux 40090 Cère,Bordeaux,40090,Cère,"40, Landes, Nouvelle-Aquitaine",locality,0.2821,-0.559301,43.987331,IV,IIIa

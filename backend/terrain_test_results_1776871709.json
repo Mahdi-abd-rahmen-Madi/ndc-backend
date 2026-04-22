@@ -1,0 +1,266 @@
+[
+  {
+    "location": "Coordinate 1",
+    "longitude": 2.3522,
+    "latitude": 48.8566,
+    "terrain_type": "IV",
+    "classification_time": 3.0030057430267334,
+    "timestamp": 1776871707.6794987
+  },
+  {
+    "location": "Coordinate 2",
+    "longitude": 4.8322,
+    "latitude": 45.7578,
+    "terrain_type": "IV",
+    "classification_time": 0.042565345764160156,
+    "timestamp": 1776871707.7221217
+  },
+  {
+    "location": "Coordinate 3",
+    "longitude": 5.3698,
+    "latitude": 43.2965,
+    "terrain_type": "0",
+    "classification_time": 0.05143857002258301,
+    "timestamp": 1776871707.7736266
+  },
+  {
+    "location": "Coordinate 4",
+    "longitude": -0.5792,
+    "latitude": 44.8378,
+    "terrain_type": "IV",
+    "classification_time": 0.042209625244140625,
+    "timestamp": 1776871707.815897
+  },
+  {
+    "location": "Coordinate 5",
+    "longitude": -4.4946,
+    "latitude": 48.3904,
+    "terrain_type": "0",
+    "classification_time": 0.04664897918701172,
+    "timestamp": 1776871707.8625972
+  },
+  {
+    "location": "Coordinate 6",
+    "longitude": 2.8266,
+    "latitude": 50.4293,
+    "terrain_type": "IV",
+    "classification_time": 0.0462346076965332,
+    "timestamp": 1776871707.9089053
+  },
+  {
+    "location": "Coordinate 7",
+    "longitude": 2.9457,
+    "latitude": 50.5199,
+    "terrain_type": "IIIb",
+    "classification_time": 0.06326127052307129,
+    "timestamp": 1776871707.9722145
+  },
+  {
+    "location": "Coordinate 8",
+    "longitude": 3.5225,
+    "latitude": 50.3572,
+    "terrain_type": "IV",
+    "classification_time": 0.04661202430725098,
+    "timestamp": 1776871708.018896
+  },
+  {
+    "location": "Coordinate 9",
+    "longitude": -0.1531,
+    "latitude": 44.8919,
+    "terrain_type": "IIIa",
+    "classification_time": 0.035773277282714844,
+    "timestamp": 1776871708.0547223
+  },
+  {
+    "location": "Coordinate 10",
+    "longitude": 7.3574,
+    "latitude": 48.0778,
+    "terrain_type": "IV",
+    "classification_time": 0.04879903793334961,
+    "timestamp": 1776871708.1035788
+  },
+  {
+    "location": "Coordinate 11",
+    "longitude": 1.4875,
+    "latitude": 48.453,
+    "terrain_type": "IV",
+    "classification_time": 0.04806351661682129,
+    "timestamp": 1776871708.151702
+  },
+  {
+    "location": "Coordinate 12",
+    "longitude": 4.0347,
+    "latitude": 49.2583,
+    "terrain_type": "IV",
+    "classification_time": 0.04502081871032715,
+    "timestamp": 1776871708.1967795
+  },
+  {
+    "location": "Coordinate 13",
+    "longitude": 1.4092,
+    "latitude": 46.7258,
+    "terrain_type": "IIIb",
+    "classification_time": 0.06787276268005371,
+    "timestamp": 1776871708.2647088
+  },
+  {
+    "location": "Coordinate 14",
+    "longitude": -1.5678,
+    "latitude": 43.4814,
+    "terrain_type": "0",
+    "classification_time": 0.048917531967163086,
+    "timestamp": 1776871708.313721
+  },
+  {
+    "location": "Coordinate 15",
+    "longitude": -2.0267,
+    "latitude": 48.6479,
+    "terrain_type": "0",
+    "classification_time": 0.04911398887634277,
+    "timestamp": 1776871708.3628964
+  },
+  {
+    "location": "Coordinate 16",
+    "longitude": -1.1514,
+    "latitude": 46.1591,
+    "terrain_type": "0",
+    "classification_time": 0.052248239517211914,
+    "timestamp": 1776871708.4152184
+  },
+  {
+    "location": "Coordinate 17",
+    "longitude": 2.2945,
+    "latitude": 48.8584,
+    "terrain_type": "IV",
+    "classification_time": 0.04818606376647949,
+    "timestamp": 1776871708.463486
+  },
+  {
+    "location": "Coordinate 18",
+    "longitude": 4.8265,
+    "latitude": 45.7696,
+    "terrain_type": "IV",
+    "classification_time": 0.057288408279418945,
+    "timestamp": 1776871708.5208364
+  },
+  {
+    "location": "Coordinate 19",
+    "longitude": 7.2789,
+    "latitude": 43.6945,
+    "terrain_type": "0",
+    "classification_time": 0.04869961738586426,
+    "timestamp": 1776871708.5695965
+  },
+  {
+    "location": "Coordinate 20",
+    "longitude": 3.0573,
+    "latitude": 43.3217,
+    "terrain_type": "IIIa",
+    "classification_time": 0.042021751403808594,
+    "timestamp": 1776871708.6116772
+  },
+  {
+    "location": "Coordinate 21",
+    "longitude": -2.3768,
+    "latitude": 47.8316,
+    "terrain_type": "IIIb",
+    "classification_time": 0.06416535377502441,
+    "timestamp": 1776871708.6759036
+  },
+  {
+    "location": "Coordinate 22",
+    "longitude": 6.1128,
+    "latitude": 49.3095,
+    "terrain_type": "IV",
+    "classification_time": 0.04504680633544922,
+    "timestamp": 1776871708.7210214
+  },
+  {
+    "location": "Coordinate 23",
+    "longitude": 0.4401,
+    "latitude": 43.5997,
+    "terrain_type": "IIIb",
+    "classification_time": 0.06002950668334961,
+    "timestamp": 1776871708.781101
+  },
+  {
+    "location": "Coordinate 24",
+    "longitude": -3.1728,
+    "latitude": 47.7268,
+    "terrain_type": "IIIa",
+    "classification_time": 0.03432917594909668,
+    "timestamp": 1776871708.8154883
+  },
+  {
+    "location": "Coordinate 25",
+    "longitude": 1.346,
+    "latitude": 43.5423,
+    "terrain_type": "IV",
+    "classification_time": 0.0420536994934082,
+    "timestamp": 1776871708.8575969
+  },
+  {
+    "location": "Coordinate 26",
+    "longitude": -0.3555,
+    "latitude": 44.9766,
+    "terrain_type": "IIIa",
+    "classification_time": 0.03770041465759277,
+    "timestamp": 1776871708.895385
+  },
+  {
+    "location": "Coordinate 27",
+    "longitude": 1.5485,
+    "latitude": 43.2238,
+    "terrain_type": "II",
+    "classification_time": 0.05713295936584473,
+    "timestamp": 1776871708.9525917
+  },
+  {
+    "location": "Coordinate 28",
+    "longitude": 2.8711,
+    "latitude": 50.007,
+    "terrain_type": "IV",
+    "classification_time": 0.04789328575134277,
+    "timestamp": 1776871709.0005417
+  },
+  {
+    "location": "Coordinate 29",
+    "longitude": -0.4774,
+    "latitude": 44.4346,
+    "terrain_type": "IIIa",
+    "classification_time": 0.038274526596069336,
+    "timestamp": 1776871709.0388727
+  },
+  {
+    "location": "Coordinate 30",
+    "longitude": 2.2286,
+    "latitude": 48.9003,
+    "terrain_type": "IIIb",
+    "classification_time": 0.04696202278137207,
+    "timestamp": 1776871709.0858932
+  },
+  {
+    "location": "Coordinate 31",
+    "longitude": 3.1329,
+    "latitude": 50.634,
+    "terrain_type": "IV",
+    "classification_time": 0.05324578285217285,
+    "timestamp": 1776871709.1392004
+  },
+  {
+    "location": "Coordinate 32",
+    "longitude": 2.3653,
+    "latitude": 48.9362,
+    "terrain_type": "IV",
+    "classification_time": 0.059105634689331055,
+    "timestamp": 1776871709.198363
+  },
+  {
+    "location": "Coordinate 33",
+    "longitude": -2.3096,
+    "latitude": 47.4995,
+    "terrain_type": "IIIb",
+    "classification_time": 0.0631866455078125,
+    "timestamp": 1776871709.261607
+  }
+]
