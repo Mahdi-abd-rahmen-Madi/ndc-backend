@@ -53,8 +53,9 @@
     },
     "terrain_IIIb": {
       "description": "Zone semi-urbaine / plus dense - Zones industrielles, zones agricoles denses, vergers, maisons rapprochées",
-      "codes": ["121", "122", "123", "124", "131", "132", "133", "142"],
+      "codes": ["112", "121", "122", "123", "124", "131", "132", "133", "141", "142"],
       "code_descriptions": {
+        "112": "Discontinuous urban fabric",
         "121": "Industrial or commercial units",
         "122": "Road and rail networks and associated land",
         "123": "Port areas",
@@ -62,16 +63,15 @@
         "131": "Mineral extraction sites",
         "132": "Dump sites",
         "133": "Construction sites",
+        "141": "Green urban areas",
         "142": "Sport and leisure facilities"
       }
     },
     "terrain_IV": {
       "description": "Zone urbaine dense - Ville, immeubles, bâtiments hauts (>15m), densité importante",
-      "codes": ["111", "112", "141"],
+      "codes": ["111"],
       "code_descriptions": {
-        "111": "Continuous urban fabric",
-        "112": "Discontinuous urban fabric",
-        "141": "Green urban areas"
+        "111": "Continuous urban fabric"
       }
     }
   },
@@ -93,7 +93,7 @@
         "default_weight": 1.1
       },
       "urban": {
-        "codes": ["111", "112", "121", "122", "123", "124", "131", "132", "133", "142"],
+        "codes": ["111", "112", "121", "122", "123", "124", "131", "132", "133", "141", "142"],
         "description": "Urban and industrial areas",
         "default_weight": 1.5
       },

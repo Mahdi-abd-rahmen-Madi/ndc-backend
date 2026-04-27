@@ -472,52 +472,146 @@ class TerrainConfigViewSet(viewsets.ViewSet):
             from .services import TerrainClassificationService
             terrain_service = TerrainClassificationService()
             
-            # Get terrain type
-            terrain_type = terrain_service.get_terrain_type_at_coordinates(longitude, latitude)
+            # Get detailed terrain classification information
+            classification_details = terrain_service.get_terrain_classification_details(longitude, latitude)
             
             # Get region from coordinates
             region = terrain_service.get_region_from_coordinates(longitude, latitude)
             
-            # Get spatial extent
+            # Get spatial extent (using cached data if available)
             gdf = terrain_service._load_land_use_data()
             spatial_extent = terrain_service._calculate_spatial_extent_percentages(longitude, latitude, gdf)
             
-            # Get applicable rules
-            applicable_rules = []
-            rules = terrain_config_service.get_classification_rules()
+            # Clean spatial extent data to handle np.float64 and nan values
+            cleaned_spatial_extent = {}
+            if spatial_extent:
+                for key, value in spatial_extent.items():
+                    if isinstance(value, (float, int)):
+                        # Handle nan values and convert to regular Python float
+                        if value != value:  # nan check
+                            cleaned_spatial_extent[key] = 0.0
+                        else:
+                            cleaned_spatial_extent[key] = float(value)
+                    else:
+                        cleaned_spatial_extent[key] = value
             
-            # Sort rules by priority and check which ones apply
-            enabled_rules = [
-                (name, rule) for name, rule in rules.items() 
-                if rule.get('enabled', True)
-            ]
-            enabled_rules.sort(key=lambda x: x[1].get('priority', 999))
-            
-            for rule_name, rule in enabled_rules:
-                if terrain_service._apply_classification_rule(rule_name, rule, terrain_type, longitude, latitude, gdf):
-                    applicable_rules.append({
-                        'name': rule_name,
-                        'priority': rule.get('priority', 999),
-                        'description': rule.get('description', '')
-                    })
+            # Clean confidence score
+            confidence_score = classification_details['confidence_score']
+            if isinstance(confidence_score, (float, int)):
+                if confidence_score != confidence_score:  # nan check
+                    confidence_score = 0.0
+                else:
+                    confidence_score = float(confidence_score)
             
             return Response({
-                'terrain_type': terrain_type,
+                'terrain_type': classification_details['terrain_type'],
+                'base_terrain_type': classification_details['base_terrain_type'],
+                'confidence_score': confidence_score,
+                'detected_clc_codes': classification_details['detected_clc_codes'],
+                'primary_clc_code': classification_details['primary_clc_code'],
                 'region': {
                     'number': region,
                     'name': f"Region {region}" if region else "Unknown"
                 },
                 'coordinates': {
-                    'longitude': longitude,
-                    'latitude': latitude
+                    'longitude': float(longitude),
+                    'latitude': float(latitude)
                 },
-                'spatial_extent': spatial_extent,
-                'applicable_rules': applicable_rules
+                'spatial_extent': cleaned_spatial_extent,
+                'applicable_rules': classification_details['applicable_rules'],
+                'rule_explanations': classification_details['rule_explanations']
             })
         except Exception as e:
             return Response(
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['get'])
+    def performance_metrics(self, request):
+        """Get performance metrics for monitoring."""
+        try:
+            metrics = terrain_service.get_performance_metrics()
+            return Response(metrics)
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['post'])
+    def reset_metrics(self, request):
+        """Reset performance metrics."""
+        try:
+            terrain_service.reset_performance_metrics()
+            return Response({'message': 'Performance metrics reset successfully'})
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['post'])
+    def clear_cache(self, request):
+        """Clear terrain classification cache."""
+        try:
+            pattern = request.data.get('pattern')
+            terrain_service.clear_cache(pattern)
+            return Response({'message': 'Cache cleared successfully'})
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['post'])
+    def optimize_memory(self, request):
+        """Optimize memory usage."""
+        try:
+            terrain_service.optimize_memory_usage()
+            return Response({'message': 'Memory optimization completed'})
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['get'])
+    def edge_cases(self, request):
+        """Get configuration edge cases and warnings."""
+        try:
+            config = terrain_config_service.load_config()
+            edge_cases = terrain_config_service.detect_edge_cases(config)
+            return Response({
+                'edge_cases': edge_cases,
+                'edge_case_count': len(edge_cases)
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['get'])
+    def terrain_confidence(self, request):
+        """Get confidence score for terrain classification at coordinates."""
+        try:
+            longitude = float(request.query_params.get('longitude'))
+            latitude = float(request.query_params.get('latitude'))
+            
+            confidence = terrain_service.get_terrain_confidence(longitude, latitude)
+            
+            return Response({
+                'coordinates': {
+                    'longitude': longitude,
+                    'latitude': latitude
+                },
+                'confidence_score': confidence
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
             )
 
 

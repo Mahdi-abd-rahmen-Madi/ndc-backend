@@ -1847,9 +1847,9 @@
             const mappings = currentConfig.clc_code_mappings || {};
             const terrainData = [
                 { key: 'terrain_0', type: '0', icon: '🌊', label: 'Water/Coastal' },
-                { key: 'terrain_II', type: 'II', icon: '🌾', label: 'Open Country' },
+                { key: 'terrain_II', type: 'II', icon: '🌾', label: 'Open Countryside' },
                 { key: 'terrain_IIIa', type: 'IIIa', icon: '🌳', label: 'Bocage' },
-                { key: 'terrain_IIIb', type: 'IIIb', icon: '🏘️', label: 'Semi-Urban' },
+                { key: 'terrain_IIIb', type: 'IIIb', icon: '🏘️', label: 'Semi-Urban/Dense' },
                 { key: 'terrain_IV', type: 'IV', icon: '🏙️', label: 'Dense Urban' }
             ];
             
@@ -2429,11 +2429,11 @@
         
         function getTerrainDescription(terrainType) {
             const descriptions = {
-                '0': 'Water/Coastal',
-                'II': 'Open Countryside',
-                'IIIa': 'Bocage Landscape',
-                'IIIb': 'Semi-Urban',
-                'IV': 'Dense Urban'
+                '0': 'Water/Coastal - Mer, océan, lacs, côte exposée',
+                'II': 'Open Countryside - Champs agricoles, prairie, quelques arbres ou bâtiments isolés',
+                'IIIa': 'Countryside with Obstacles - Bocage, vignobles, haies, habitat dispersé',
+                'IIIb': 'Semi-Urban/Dense - Zones industrielles, zones agricoles denses, vergers, discontinuous urban fabric',
+                'IV': 'Dense Urban - Ville, immeubles, bâtiments hauts (>15m), continuous urban fabric'
             };
             return descriptions[terrainType] || 'Unknown';
         }
@@ -2941,9 +2941,9 @@
             
             const terrainTypes = [
                 { key: 'terrain_0', type: '0', icon: '🌊', label: 'Water/Coastal' },
-                { key: 'terrain_II', type: 'II', icon: '🌾', label: 'Open Country' },
+                { key: 'terrain_II', type: 'II', icon: '🌾', label: 'Open Countryside' },
                 { key: 'terrain_IIIa', type: 'IIIa', icon: '🌳', label: 'Bocage' },
-                { key: 'terrain_IIIb', type: 'IIIb', icon: '🏘️', label: 'Semi-Urban' },
+                { key: 'terrain_IIIb', type: 'IIIb', icon: '🏘️', label: 'Semi-Urban/Dense' },
                 { key: 'terrain_IV', type: 'IV', icon: '🏙️', label: 'Dense Urban' }
             ];
             

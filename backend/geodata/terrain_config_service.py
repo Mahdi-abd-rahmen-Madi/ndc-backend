@@ -55,7 +55,7 @@ class TerrainConfigService:
             raise
     
     def _validate_config(self, config: Dict[str, Any]) -> None:
-        """Validate the configuration structure."""
+        """Validate the configuration structure with enhanced edge case detection."""
         required_sections = ['clc_code_mappings', 'classification_rules', 'spatial_analysis']
         
         for section in required_sections:
@@ -71,6 +71,138 @@ class TerrainConfigService:
                 raise ValueError(f"Missing terrain type mapping: {terrain_type}")
             if 'codes' not in clc_mappings[terrain_type]:
                 raise ValueError(f"Missing codes for terrain type: {terrain_type}")
+        
+        # Enhanced validation for classification rules
+        self._validate_classification_rules(config.get('classification_rules', {}))
+        
+        # Validate spatial analysis parameters
+        self._validate_spatial_analysis(config.get('spatial_analysis', {}))
+        
+        # Validate influence percentages
+        self._validate_influence_percentages(config.get('influence_percentages', {}))
+    
+    def _validate_classification_rules(self, rules: Dict[str, Any]) -> None:
+        """Validate classification rules for logical consistency."""
+        # Check for priority conflicts
+        priorities = {}
+        for rule_name, rule in rules.items():
+            priority = rule.get('priority', 999)
+            if priority in priorities:
+                existing_rule = priorities[priority]
+                logger.warning(f"Priority conflict: {rule_name} and {existing_rule} both have priority {priority}")
+            priorities[priority] = rule_name
+        
+        # Validate rule conditions
+        for rule_name, rule in rules.items():
+            conditions = rule.get('conditions', {})
+            
+            # Check applicable terrain validity
+            applicable_terrain = conditions.get('applicable_to_terrain', [])
+            valid_terrains = ['0', 'II', 'IIIa', 'IIIb', 'IV']
+            
+            for terrain in applicable_terrain:
+                if terrain not in valid_terrains:
+                    logger.warning(f"Invalid terrain type '{terrain}' in rule '{rule_name}'")
+            
+            # Validate threshold values
+            if 'distance_threshold_km' in conditions:
+                threshold = conditions['distance_threshold_km']
+                if not isinstance(threshold, (int, float)) or threshold <= 0:
+                    logger.warning(f"Invalid distance threshold in rule '{rule_name}': {threshold}")
+            
+            # Validate percentage thresholds
+            percentage_keys = [
+                'dense_urban_threshold', 'total_urban_threshold', 'agriculture_threshold',
+                'complex_agriculture_threshold', 'forest_threshold', 'urban_dominance_threshold'
+            ]
+            
+            for key in percentage_keys:
+                if key in conditions:
+                    value = conditions[key]
+                    if not isinstance(value, (int, float)) or not (0 <= value <= 100):
+                        logger.warning(f"Invalid percentage threshold '{key}' in rule '{rule_name}': {value}")
+    
+    def _validate_spatial_analysis(self, spatial_config: Dict[str, Any]) -> None:
+        """Validate spatial analysis configuration."""
+        # Validate distance thresholds
+        distance_thresholds = spatial_config.get('distance_thresholds_km', {})
+        for key, value in distance_thresholds.items():
+            if not isinstance(value, (int, float)) or value <= 0:
+                logger.warning(f"Invalid distance threshold '{key}': {value}")
+        
+        # Validate analysis radii
+        analysis_radii = spatial_config.get('analysis_radii_km', {})
+        for key, value in analysis_radii.items():
+            if not isinstance(value, (int, float)) or value <= 0:
+                logger.warning(f"Invalid analysis radius '{key}': {value}")
+        
+        # Validate density thresholds
+        density_thresholds = spatial_config.get('density_thresholds', {})
+        for key, value in density_thresholds.items():
+            if not isinstance(value, (int, float)) or not (0 <= value <= 1):
+                logger.warning(f"Invalid density threshold '{key}': {value}")
+    
+    def _validate_influence_percentages(self, influence_config: Dict[str, Any]) -> None:
+        """Validate influence percentages configuration."""
+        spatial_categories = influence_config.get('spatial_extent_categories', {})
+        
+        for category_name, category_config in spatial_categories.items():
+            if 'codes' not in category_config:
+                logger.warning(f"Missing codes for spatial category '{category_name}'")
+                continue
+            
+            codes = category_config['codes']
+            if not isinstance(codes, list) or not all(isinstance(code, str) for code in codes):
+                logger.warning(f"Invalid codes format for spatial category '{category_name}'")
+            
+            # Validate weight if present
+            weight = category_config.get('default_weight')
+            if weight is not None and (not isinstance(weight, (int, float)) or weight <= 0):
+                logger.warning(f"Invalid weight for spatial category '{category_name}': {weight}")
+    
+    def detect_edge_cases(self, config: Dict[str, Any]) -> List[str]:
+        """Detect potential edge cases and configuration issues."""
+        edge_cases = []
+        
+        # Check for overlapping terrain classifications
+        clc_mappings = config.get('clc_code_mappings', {})
+        all_codes = []
+        
+        for terrain_type, mapping in clc_mappings.items():
+            codes = mapping.get('codes', [])
+            for code in codes:
+                if code in all_codes:
+                    edge_cases.append(f"CLC code '{code}' appears in multiple terrain mappings")
+                else:
+                    all_codes.append(code)
+        
+        # Check for rule priority gaps
+        rules = config.get('classification_rules', {})
+        priorities = [rule.get('priority', 999) for rule in rules.values()]
+        priorities.sort()
+        
+        for i in range(len(priorities) - 1):
+            if priorities[i + 1] - priorities[i] > 10:
+                edge_cases.append(f"Large priority gap between rules: {priorities[i]} and {priorities[i + 1]}")
+        
+        # Check for performance issues
+        spatial_config = config.get('spatial_analysis', {})
+        analysis_radii = spatial_config.get('analysis_radii_km', {})
+        
+        for key, radius in analysis_radii.items():
+            if radius > 10.0:  # Large analysis radius
+                edge_cases.append(f"Large analysis radius '{key}': {radius}km may impact performance")
+        
+        # Check cache settings
+        performance_settings = config.get('performance_settings', {})
+        cache_timeout = performance_settings.get('cache_timeout_seconds', 3600)
+        
+        if cache_timeout < 300:  # Less than 5 minutes
+            edge_cases.append(f"Short cache timeout ({cache_timeout}s) may reduce performance")
+        elif cache_timeout > 86400:  # More than 24 hours
+            edge_cases.append(f"Long cache timeout ({cache_timeout}s) may cause stale data")
+        
+        return edge_cases
     
     def get_clc_code_mappings(self) -> Dict[str, Dict[str, Any]]:
         """Get CLC code to terrain type mappings."""

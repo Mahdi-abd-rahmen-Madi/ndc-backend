@@ -4,11 +4,14 @@ Terrain classification service for determining terrain types from land use data.
 import os
 import logging
 import math
-from typing import Optional, Tuple
+import time
+from typing import Optional, Tuple, Dict, List, Any
 from django.conf import settings
 from django.core.cache import cache
 import geopandas as gpd
-from shapely.geometry import Point
+import numpy as np
+from shapely.geometry import Point, box
+from shapely.strtree import STRtree
 from .models import AntennaEquipment
 from .terrain_config_service import terrain_config_service
 
@@ -27,6 +30,17 @@ class TerrainClassificationService:
         self._spatial_index = None
         self._water_areas = None
         self._urban_areas = None
+        self._forest_areas = None
+        self._agriculture_areas = None
+        self._complex_agriculture_areas = None
+        self._spatial_indexes = {}
+        self._index_cache_timeout = 7200  # 2 hours for spatial indexes
+        self._performance_metrics = {
+            'cache_hits': 0,
+            'cache_misses': 0,
+            'spatial_queries': 0,
+            'classification_time': []
+        }
         
     def _load_land_use_data(self):
         """Load land use data from FlatGeobuf file with spatial indexing."""
@@ -47,7 +61,7 @@ class TerrainClassificationService:
         return self.land_use_data
     
     def _pre_filter_areas(self):
-        """Pre-filter water and urban areas for performance optimization."""
+        """Pre-filter water and urban areas for performance optimization with multi-level indexing."""
         if self.land_use_data is not None:
             # Get performance settings from configuration
             config = terrain_config_service.load_config()
@@ -68,10 +82,51 @@ class TerrainClassificationService:
                 '131', '132', '133', '142'   # Industrial zones
             ])
             
-            self._water_areas = self.land_use_data[self.land_use_data['Code_18'].isin(water_codes)]
-            self._urban_areas = self.land_use_data[self.land_use_data['Code_18'].isin(urban_codes)]
+            # Forest codes for specialized indexing
+            forest_codes = ['311', '312', '313', '321', '322', '323', '324']
             
-            logger.info(f"Pre-filtered {len(self._water_areas)} water areas and {len(self._urban_areas)} urban areas")
+            # Agriculture codes for specialized indexing
+            agriculture_codes = ['211', '212', '213', '231']
+            complex_agriculture_codes = ['241', '242', '243', '244']
+            
+            # Pre-filter areas with spatial indexing
+            self._water_areas = self._create_indexed_subset(water_codes, 'water')
+            self._urban_areas = self._create_indexed_subset(urban_codes, 'urban')
+            self._forest_areas = self._create_indexed_subset(forest_codes, 'forest')
+            self._agriculture_areas = self._create_indexed_subset(agriculture_codes, 'agriculture')
+            self._complex_agriculture_areas = self._create_indexed_subset(complex_agriculture_codes, 'complex_agriculture')
+            
+            logger.info(f"Pre-filtered areas: {len(self._water_areas)} water, {len(self._urban_areas)} urban, "
+                       f"{len(self._forest_areas)} forest, {len(self._agriculture_areas)} agriculture, "
+                       f"{len(self._complex_agriculture_areas)} complex agriculture")
+    
+    def _create_indexed_subset(self, codes: List[str], category_name: str) -> gpd.GeoDataFrame:
+        """Create a spatially indexed subset of land use data for specific codes."""
+        try:
+            # Filter by codes
+            subset = self.land_use_data[self.land_use_data['Code_18'].isin(codes)].copy()
+            
+            if len(subset) == 0:
+                return subset
+            
+            # Create spatial index for this subset
+            if hasattr(subset, 'sindex'):
+                subset.sindex
+            
+            # Create STRtree for faster spatial queries
+            if hasattr(subset, 'geometry') and len(subset) > 0:
+                tree = STRtree(subset.geometry.tolist())
+                self._spatial_indexes[category_name] = {
+                    'tree': tree,
+                    'data': subset,
+                    'created_at': time.time()
+                }
+            
+            return subset
+            
+        except Exception as e:
+            logger.warning(f"Error creating indexed subset for {category_name}: {e}")
+            return self.land_use_data[self.land_use_data['Code_18'].isin(codes)]
     
     def _load_wind_coeff_data(self):
         """Load wind coefficient data from GeoJSON file."""
@@ -134,13 +189,21 @@ class TerrainClassificationService:
         Returns:
             Terrain type string ('0', 'II', 'IIIa', 'IIIb', 'IV') or None if not found
         """
-        # Create cache key
+        start_time = time.time()
+        
+        # Create hierarchical cache key
         cache_key = f"terrain_{longitude:.6f}_{latitude:.6f}"
+        confidence_cache_key = f"confidence_{longitude:.6f}_{latitude:.6f}"
+        spatial_cache_key = f"spatial_{longitude:.6f}_{latitude:.6f}"
         
         # Try to get from cache first
         cached_result = cache.get(cache_key)
         if cached_result is not None:
+            self._performance_metrics['cache_hits'] += 1
+            self._performance_metrics['classification_time'].append(time.time() - start_time)
             return cached_result
+        
+        self._performance_metrics['cache_misses'] += 1
         
         try:
             # Load land use data
@@ -149,34 +212,422 @@ class TerrainClassificationService:
             # Create point geometry
             point = Point(longitude, latitude)
             
-            # Find intersecting polygon
-            intersects = gdf[gdf.geometry.intersects(point)]
+            # Find intersecting polygon using optimized spatial query
+            intersects = self._optimized_spatial_query(point, gdf)
             
             if len(intersects) > 0:
                 # Get the first intersecting polygon's Code_18
                 clc_code = intersects.iloc[0]['Code_18']
                 terrain_type = terrain_config_service.get_terrain_type_from_clc_code(clc_code)
                 
-                # Apply enhanced classification rules
-                terrain_type = self._apply_enhanced_rules(terrain_type, longitude, latitude, gdf)
+                # Apply enhanced classification rules with confidence scoring
+                terrain_type, confidence_score = self._apply_enhanced_rules_with_confidence(
+                    terrain_type, longitude, latitude, gdf
+                )
                 
-                # Cache the result
-                cache.set(cache_key, terrain_type, self.cache_timeout)
+                # Cache the result with hierarchical timeout
+                cache_timeout = self._get_adaptive_cache_timeout(terrain_type)
+                cache.set(cache_key, terrain_type, cache_timeout)
                 
-                logger.debug(f"Coordinates ({longitude}, {latitude}) -> CLC: {clc_code} -> Terrain: {terrain_type}")
+                # Cache confidence score separately
+                cache.set(confidence_cache_key, confidence_score, cache_timeout)
+                
+                # Cache spatial extent data for reuse
+                if spatial_cache_key not in cache:
+                    spatial_data = self._calculate_spatial_extent_percentages(longitude, latitude, gdf)
+                    cache.set(spatial_cache_key, spatial_data, self._index_cache_timeout)
+                
+                self._performance_metrics['classification_time'].append(time.time() - start_time)
+                
+                logger.debug(f"Coordinates ({longitude}, {latitude}) -> CLC: {clc_code} -> Terrain: {terrain_type} (Confidence: {confidence_score:.2f})")
                 return terrain_type
             else:
                 logger.warning(f"No land use data found at coordinates ({longitude}, {latitude})")
                 cache.set(cache_key, None, self.cache_timeout)
+                cache.set(confidence_cache_key, 0.0, self.cache_timeout)
+                self._performance_metrics['classification_time'].append(time.time() - start_time)
                 return None
                 
         except Exception as e:
             logger.error(f"Error determining terrain type at coordinates ({longitude}, {latitude}): {e}")
+            self._performance_metrics['classification_time'].append(time.time() - start_time)
             return None
+    
+    def get_terrain_confidence(self, longitude: float, latitude: float) -> float:
+        """Get confidence score for terrain classification at coordinates."""
+        confidence_cache_key = f"confidence_{longitude:.6f}_{latitude:.6f}"
+        cached_confidence = cache.get(confidence_cache_key)
+        
+        if cached_confidence is not None:
+            return cached_confidence
+        
+        # If not cached, run classification to generate confidence
+        self.get_terrain_type_at_coordinates(longitude, latitude)
+        
+        # Return cached confidence
+        return cache.get(confidence_cache_key, 0.0)
+    
+    def get_terrain_classification_details(self, longitude: float, latitude: float) -> dict:
+        """
+        Get detailed terrain classification information including base and final terrain types.
+        
+        Args:
+            longitude: Longitude coordinate
+            latitude: Latitude coordinate
+            
+        Returns:
+            Dictionary with detailed classification information
+        """
+        try:
+            # Load land use data
+            gdf = self._load_land_use_data()
+            
+            # Create point geometry
+            point = Point(longitude, latitude)
+            
+            # Find intersecting polygon using optimized spatial query
+            intersects = self._optimized_spatial_query(point, gdf)
+            
+            if len(intersects) > 0:
+                # Get the first intersecting polygon's Code_18
+                clc_code = intersects.iloc[0]['Code_18']
+                base_terrain_type = terrain_config_service.get_terrain_type_from_clc_code(clc_code)
+                
+                # Apply enhanced classification rules with confidence scoring
+                final_terrain_type, confidence_score = self._apply_enhanced_rules_with_confidence(
+                    base_terrain_type, longitude, latitude, gdf
+                )
+                
+                # Get detected CLC codes
+                detected_clc_codes = intersects['Code_18'].unique().tolist()
+                
+                # Use the same rule application logic as the main classification
+                # Calculate weighted scores for each applicable rule
+                rule_scores = self._calculate_weighted_rule_scores(base_terrain_type, longitude, latitude, gdf)
+                
+                # Sort rules by priority and score
+                scored_rules = [
+                    (name, rule, score) for name, rule, score in rule_scores
+                    if rule.get('enabled', True) and score > 0
+                ]
+                scored_rules.sort(key=lambda x: (x[1].get('priority', 999), -x[2]))
+                
+                applicable_rules = []
+                rule_explanations = {}
+                
+                # Only the highest scoring rule should be applied
+                if scored_rules:
+                    rule_name, rule, score = scored_rules[0]
+                    applicable_rules.append({
+                        'name': rule_name,
+                        'priority': rule.get('priority', 999),
+                        'description': rule.get('description', ''),
+                        'score': score
+                    })
+                    # Generate explanation for this rule
+                    rule_explanations[rule_name] = self._generate_rule_explanation(
+                        rule_name, rule, base_terrain_type, longitude, latitude, gdf
+                    )
+                
+                return {
+                    'base_terrain_type': base_terrain_type,
+                    'terrain_type': final_terrain_type,
+                    'confidence_score': confidence_score,
+                    'detected_clc_codes': detected_clc_codes,
+                    'primary_clc_code': clc_code,
+                    'applicable_rules': applicable_rules,
+                    'rule_explanations': rule_explanations
+                }
+            else:
+                return {
+                    'base_terrain_type': None,
+                    'terrain_type': None,
+                    'confidence_score': 0.0,
+                    'detected_clc_codes': [],
+                    'primary_clc_code': None,
+                    'applicable_rules': [],
+                    'rule_explanations': {}
+                }
+                
+        except Exception as e:
+            logger.error(f"Error getting terrain classification details at coordinates ({longitude}, {latitude}): {e}")
+            return {
+                'base_terrain_type': None,
+                'terrain_type': None,
+                'confidence_score': 0.0,
+                'detected_clc_codes': [],
+                'primary_clc_code': None,
+                'applicable_rules': [],
+                'rule_explanations': {}
+            }
+    
+    def detect_clc_codes_at_coordinates(self, longitude: float, latitude: float) -> List[str]:
+        """
+        Detect all CLC codes at specific coordinates.
+        
+        Args:
+            longitude: Longitude coordinate
+            latitude: Latitude coordinate
+            
+        Returns:
+            List of unique CLC codes found at the coordinates
+        """
+        try:
+            # Load land use data
+            gdf = self._load_land_use_data()
+            
+            # Create point geometry
+            point = Point(longitude, latitude)
+            
+            # Find intersecting polygons using optimized spatial query
+            intersects = self._optimized_spatial_query(point, gdf)
+            
+            if len(intersects) > 0:
+                # Get unique CLC codes from all intersecting polygons
+                clc_codes = intersects['Code_18'].unique().tolist()
+                logger.debug(f"Found {len(clc_codes)} CLC codes at ({longitude}, {latitude}): {clc_codes}")
+                return clc_codes
+            else:
+                logger.debug(f"No land use data found at coordinates ({longitude}, {latitude})")
+                return []
+                
+        except Exception as e:
+            logger.error(f"Error detecting CLC codes at coordinates ({longitude}, {latitude}): {e}")
+            return []
+    
+    def get_clc_codes_in_extent(self, longitude: float, latitude: float, radius_km: float = 2.0) -> List[str]:
+        """
+        Get all CLC codes within spatial extent of coordinates.
+        
+        Args:
+            longitude: Longitude coordinate
+            latitude: Latitude coordinate
+            radius_km: Analysis radius in kilometers
+            
+        Returns:
+            List of unique CLC codes found within the extent
+        """
+        try:
+            # Load land use data
+            gdf = self._load_land_use_data()
+            
+            # Create point geometry
+            point = Point(longitude, latitude)
+            
+            # Convert radius to degrees
+            lat_rad = math.radians(latitude)
+            km_per_deg_lat = 111.0
+            radius_deg_lat = radius_km / km_per_deg_lat
+            
+            # Create buffer and intersect with land use data
+            search_area = point.buffer(radius_deg_lat)
+            intersects = gdf[gdf.geometry.intersects(search_area)]
+            
+            if len(intersects) > 0:
+                # Get unique CLC codes from all intersecting polygons
+                clc_codes = intersects['Code_18'].unique().tolist()
+                logger.debug(f"Found {len(clc_codes)} CLC codes within {radius_km}km of ({longitude}, {latitude}): {clc_codes}")
+                return clc_codes
+            else:
+                logger.debug(f"No land use data found within {radius_km}km of coordinates ({longitude}, {latitude})")
+                return []
+                
+        except Exception as e:
+            logger.error(f"Error detecting CLC codes in extent of ({longitude}, {latitude}): {e}")
+            return []
+    
+    def _apply_enhanced_rules_with_confidence(self, terrain_type: str, longitude: float, latitude: float, gdf) -> Tuple[str, float]:
+        """
+        Apply enhanced classification rules with confidence scoring.
+        
+        Returns:
+            Tuple of (terrain_type, confidence_score)
+        """
+        # Get classification rules from configuration
+        rules = terrain_config_service.get_classification_rules()
+        
+        # Calculate weighted scores for each applicable rule
+        rule_scores = self._calculate_weighted_rule_scores(terrain_type, longitude, latitude, gdf)
+        
+        # Sort rules by priority and score
+        scored_rules = [
+            (name, rule, score) for name, rule, score in rule_scores
+            if rule.get('enabled', True) and score > 0
+        ]
+        scored_rules.sort(key=lambda x: (x[1].get('priority', 999), -x[2]))
+        
+        # Calculate base confidence from CLC mapping
+        base_confidence = self._calculate_base_confidence(terrain_type, longitude, latitude, gdf)
+        
+        # Apply the highest scoring rule and adjust confidence
+        if scored_rules:
+            rule_name, rule, score = scored_rules[0]
+            modified_terrain = self._get_rule_result(rule_name, terrain_type, longitude, latitude, gdf)
+            
+            if modified_terrain != terrain_type:
+                # Rule was applied - adjust confidence based on rule score
+                rule_confidence = min(score / 100.0, 1.0)  # Normalize score to 0-1
+                final_confidence = (base_confidence + rule_confidence) / 2.0
+                
+                logger.debug(f"Rule {rule_name} applied with score {score:.2f}: {terrain_type} -> {modified_terrain} (Confidence: {final_confidence:.2f})")
+                return modified_terrain, final_confidence
+        
+        # No rule applied - return base classification with base confidence
+        return terrain_type, base_confidence
+    
+    def _calculate_base_confidence(self, terrain_type: str, longitude: float, latitude: float, gdf) -> float:
+        """Calculate base confidence score from CLC mapping and spatial data quality."""
+        try:
+            # Get multi-scale spatial data
+            multi_scale_data = self._multi_scale_analysis(longitude, latitude, gdf, [1.0, 2.0])
+            
+            # Calculate confidence factors
+            confidence_factors = {
+                'data_consistency': self._calculate_data_consistency(multi_scale_data),
+                'terrain_clarity': self._calculate_terrain_clarity(terrain_type, multi_scale_data),
+                'spatial_homogeneity': self._calculate_spatial_homogeneity(multi_scale_data)
+            }
+            
+            # Weight the factors
+            weights = {
+                'data_consistency': 0.4,
+                'terrain_clarity': 0.4,
+                'spatial_homogeneity': 0.2
+            }
+            
+            # Calculate weighted confidence
+            confidence = sum(
+                confidence_factors[factor] * weights[factor] 
+                for factor in confidence_factors
+            )
+            
+            return min(max(confidence, 0.1), 1.0)  # Clamp between 0.1 and 1.0
+            
+        except Exception as e:
+            logger.debug(f"Error calculating base confidence: {e}")
+            return 0.5  # Default moderate confidence
+    
+    def _calculate_data_consistency(self, multi_scale_data: Dict[float, dict]) -> float:
+        """Calculate data consistency across different scales."""
+        if len(multi_scale_data) < 2:
+            return 0.5
+        
+        scales = sorted(multi_scale_data.keys())
+        consistency_scores = []
+        
+        for i in range(len(scales) - 1):
+            scale1_data = multi_scale_data[scales[i]]
+            scale2_data = multi_scale_data[scales[i + 1]]
+            
+            # Calculate correlation between scales
+            categories = ['agriculture', 'complex_agriculture', 'forest', 'urban', 'coastal']
+            
+            values1 = [scale1_data.get(cat, 0) for cat in categories]
+            values2 = [scale2_data.get(cat, 0) for cat in categories]
+            
+            # Simple correlation calculation
+            if sum(values1) > 0 and sum(values2) > 0:
+                correlation = sum(min(v1, v2) for v1, v2 in zip(values1, values2)) / max(sum(values1), sum(values2))
+                consistency_scores.append(correlation)
+        
+        return np.mean(consistency_scores) if consistency_scores else 0.5
+    
+    def _calculate_terrain_clarity(self, terrain_type: str, multi_scale_data: Dict[float, dict]) -> float:
+        """Calculate how clearly the terrain type is expressed in the spatial data."""
+        # Expected dominant characteristics for each terrain type
+        terrain_signatures = {
+            '0': {'coastal': 60.0},
+            'II': {'agriculture': 50.0},
+            'IIIa': {'complex_agriculture': 15.0, 'forest': 20.0},
+            'IIIb': {'urban': 40.0},
+            'IV': {'urban': 70.0}
+        }
+        
+        signature = terrain_signatures.get(terrain_type, {})
+        if not signature:
+            return 0.5
+        
+        clarity_scores = []
+        
+        for scale, data in multi_scale_data.items():
+            scale_clarity = 0.0
+            
+            for category, expected_threshold in signature.items():
+                actual_pct = data.get(category, 0)
+                if actual_pct >= expected_threshold:
+                    scale_clarity += 1.0
+                else:
+                    scale_clarity += actual_pct / expected_threshold
+            
+            clarity_scores.append(scale_clarity / len(signature))
+        
+        return np.mean(clarity_scores) if clarity_scores else 0.5
+    
+    def _calculate_spatial_homogeneity(self, multi_scale_data: Dict[float, dict]) -> float:
+        """Calculate spatial homogeneity - higher for less mixed terrain."""
+        homogeneity_scores = []
+        
+        for scale, data in multi_scale_data.items():
+            # Calculate Shannon entropy for land use distribution
+            categories = ['agriculture', 'complex_agriculture', 'forest', 'urban', 'coastal']
+            values = [data.get(cat, 0) for cat in categories]
+            
+            # Normalize to probabilities
+            total = sum(values)
+            if total == 0:
+                homogeneity_scores.append(0.5)
+                continue
+            
+            probabilities = [v / total for v in values if v > 0]
+            
+            # Calculate entropy
+            entropy = -sum(p * math.log(p) for p in probabilities)
+            max_entropy = math.log(len(probabilities))
+            
+            # Convert entropy to homogeneity (inverse of entropy)
+            homogeneity = 1.0 - (entropy / max_entropy)
+            homogeneity_scores.append(homogeneity)
+        
+        return np.mean(homogeneity_scores) if homogeneity_scores else 0.5
+    
+    def _optimized_spatial_query(self, point: Point, gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+        """Optimized spatial query using multi-level indexing."""
+        self._performance_metrics['spatial_queries'] += 1
+        
+        # Use the main spatial index for initial filtering
+        try:
+            # Get possible matches using spatial index
+            possible_matches_index = list(gdf.sindex.intersection(point.bounds))
+            if len(possible_matches_index) == 0:
+                return gpd.GeoDataFrame()
+            
+            possible_matches = gdf.iloc[possible_matches_index]
+            
+            # Filter by actual intersection
+            intersects = possible_matches[possible_matches.geometry.intersects(point)]
+            
+            return intersects
+            
+        except Exception as e:
+            logger.debug(f"Error in optimized spatial query: {e}")
+            # Fallback to basic query
+            return gdf[gdf.geometry.intersects(point)]
+    
+    def _get_adaptive_cache_timeout(self, terrain_type: str) -> int:
+        """Get adaptive cache timeout based on terrain type complexity."""
+        # More complex terrain types get longer cache times
+        timeout_map = {
+            '0': 7200,  # Coastal - stable
+            'IV': 3600,  # Urban - moderate changes
+            'IIIb': 1800,  # Semi-urban - more dynamic
+            'IIIa': 1800,  # Bocage - seasonal changes
+            'II': 3600,   # Open countryside - stable
+        }
+        return timeout_map.get(terrain_type, self.cache_timeout)
     
     def _apply_enhanced_rules(self, terrain_type: str, longitude: float, latitude: float, gdf) -> str:
         """
-        Apply enhanced classification rules with proper priority order based on configuration.
+        Apply enhanced classification rules with weighted scoring and multi-scale analysis.
         
         Args:
             terrain_type: Initial terrain type from CLC mapping
@@ -190,22 +641,308 @@ class TerrainClassificationService:
         # Get classification rules from configuration
         rules = terrain_config_service.get_classification_rules()
         
-        # Sort rules by priority and apply enabled rules
-        enabled_rules = [
-            (name, rule) for name, rule in rules.items() 
-            if rule.get('enabled', True)
-        ]
-        enabled_rules.sort(key=lambda x: x[1].get('priority', 999))
+        # Calculate weighted scores for each applicable rule
+        rule_scores = self._calculate_weighted_rule_scores(terrain_type, longitude, latitude, gdf)
         
-        for rule_name, rule in enabled_rules:
-            if self._apply_classification_rule(rule_name, rule, terrain_type, longitude, latitude, gdf):
-                # Rule was applied and modified terrain type
-                modified_terrain = self._get_rule_result(rule_name, terrain_type, longitude, latitude, gdf)
-                if modified_terrain != terrain_type:
-                    logger.debug(f"Rule {rule_name} applied: {terrain_type} -> {modified_terrain}")
-                    return modified_terrain
+        # Sort rules by priority and score
+        scored_rules = [
+            (name, rule, score) for name, rule, score in rule_scores
+            if rule.get('enabled', True) and score > 0
+        ]
+        scored_rules.sort(key=lambda x: (x[1].get('priority', 999), -x[2]))
+        
+        # Apply the highest scoring rule
+        for rule_name, rule, score in scored_rules:
+            modified_terrain = self._get_rule_result(rule_name, terrain_type, longitude, latitude, gdf)
+            if modified_terrain != terrain_type:
+                logger.debug(f"Rule {rule_name} applied with score {score:.2f}: {terrain_type} -> {modified_terrain}")
+                return modified_terrain
         
         return terrain_type
+    
+    def _calculate_weighted_rule_scores(self, terrain_type: str, longitude: float, latitude: float, gdf) -> List[Tuple[str, dict, float]]:
+        """Calculate weighted scores for classification rules using multi-scale analysis."""
+        rules = terrain_config_service.get_classification_rules()
+        scored_rules = []
+        
+        for rule_name, rule in rules.items():
+            if not rule.get('enabled', True):
+                continue
+            
+            score = self._calculate_rule_score(rule_name, rule, terrain_type, longitude, latitude, gdf)
+            scored_rules.append((rule_name, rule, score))
+        
+        return scored_rules
+    
+    def _calculate_rule_score(self, rule_name: str, rule: dict, terrain_type: str, 
+                            longitude: float, latitude: float, gdf) -> float:
+        """Calculate weighted score for a specific classification rule."""
+        try:
+            if rule_name == 'coastal_exposure':
+                return self._score_coastal_exposure(longitude, latitude, gdf)
+            
+            elif rule_name == 'dense_urban':
+                applicable_terrain = rule.get('conditions', {}).get('applicable_to_terrain', ['II', 'IIIb'])
+                if terrain_type not in applicable_terrain:
+                    return 0.0
+                return self._score_dense_urban(longitude, latitude, gdf)
+            
+            elif rule_name == 'bocage_characteristics':
+                applicable_terrain = rule.get('conditions', {}).get('applicable_to_terrain', ['IV', 'IIIb'])
+                if terrain_type not in applicable_terrain:
+                    return 0.0
+                return self._score_bocage_characteristics(longitude, latitude, gdf)
+            
+            elif rule_name == 'open_countryside':
+                applicable_terrain = rule.get('conditions', {}).get('applicable_to_terrain', ['IIIa'])
+                if terrain_type not in applicable_terrain:
+                    return 0.0
+                return self._score_open_countryside(longitude, latitude, gdf)
+            
+            elif rule_name == 'transitional_zone':
+                applicable_terrain = rule.get('conditions', {}).get('applicable_to_terrain', ['II'])
+                if terrain_type not in applicable_terrain:
+                    return 0.0
+                return self._score_transitional_zone(longitude, latitude, gdf)
+            
+            elif rule_name == 'proximity_urban':
+                applicable_terrain = rule.get('conditions', {}).get('applicable_to_terrain', ['II'])
+                if terrain_type not in applicable_terrain:
+                    return 0.0
+                return self._score_proximity_urban(longitude, latitude, gdf)
+            
+            elif rule_name == 'proximity_forest':
+                applicable_terrain = rule.get('conditions', {}).get('applicable_to_terrain', ['II'])
+                if terrain_type not in applicable_terrain:
+                    return 0.0
+                return self._score_proximity_forest(longitude, latitude, gdf)
+            
+            return 0.0
+            
+        except Exception as e:
+            logger.debug(f"Error calculating score for rule {rule_name}: {e}")
+            return 0.0
+    
+    def _multi_scale_analysis(self, longitude: float, latitude: float, gdf, scales: List[float] = None) -> Dict[float, dict]:
+        """Perform multi-scale spatial analysis at different radii."""
+        if scales is None:
+            scales = [0.5, 1.0, 2.0, 5.0]  # 500m, 1km, 2km, 5km
+        
+        results = {}
+        for scale in scales:
+            extent_data = self._calculate_spatial_extent_percentages(longitude, latitude, gdf, scale)
+            results[scale] = extent_data
+        
+        return results
+    
+    def _score_coastal_exposure(self, longitude: float, latitude: float, gdf) -> float:
+        """Score coastal exposure using multi-scale analysis."""
+        multi_scale_data = self._multi_scale_analysis(longitude, latitude, gdf, [1.0, 2.0, 5.0])
+        
+        score = 0.0
+        
+        # Check multiple scales for coastal presence
+        for scale, data in multi_scale_data.items():
+            coastal_pct = data.get('coastal', 0)
+            urban_pct = data.get('urban', 0)
+            
+            # Higher weight for larger scales
+            scale_weight = scale / 5.0  # Normalize to 0-1
+            
+            if urban_pct > 50:
+                # Urban areas - only score if true coastal water
+                if coastal_pct > 10:
+                    score += 25.0 * scale_weight
+            else:
+                # Non-urban areas - any significant coastal presence
+                if coastal_pct > 5:
+                    score += 30.0 * scale_weight
+        
+        return min(score, 100.0)
+    
+    def _score_dense_urban(self, longitude: float, latitude: float, gdf) -> float:
+        """Score dense urban characteristics using multi-scale analysis."""
+        # Use the same logic as the boolean check to ensure consistency
+        if not self._is_dense_urban_area(longitude, latitude, gdf):
+            return 0.0
+        
+        # If the rule applies, give it a score based on how strongly it applies
+        extent_pct = self._calculate_spatial_extent_percentages(longitude, latitude, gdf, 2.0)
+        
+        if not extent_pct:
+            return 0.0
+        
+        urban_pct = extent_pct.get('urban', 0)
+        
+        # Get thresholds from configuration
+        thresholds = terrain_config_service.get_spatial_analysis_config()
+        total_urban_threshold = thresholds.get('density_thresholds', {}).get('total_urban_area', 0.65)
+        
+        score = 0.0
+        
+        # Score based on how much the urban coverage exceeds the threshold
+        if urban_pct > (total_urban_threshold * 100):  # Convert from decimal to percentage
+            excess = urban_pct - (total_urban_threshold * 100)
+            score += min(excess / 10.0, 1.0) * 50.0  # Up to 50 points for excess urban coverage
+        
+        # Add base score for meeting the threshold
+        score += 50.0
+        
+        return min(score, 100.0)
+    
+    def _score_bocage_characteristics(self, longitude: float, latitude: float, gdf) -> float:
+        """Score bocage characteristics using multi-scale analysis."""
+        # Use the same logic as the boolean check to ensure consistency
+        if not self._has_bocage_characteristics(longitude, latitude, gdf):
+            return 0.0
+        
+        # If the rule applies, give it a score based on how strongly it applies
+        extent_pct = self._calculate_spatial_extent_percentages(longitude, latitude, gdf, 2.0)
+        
+        if not extent_pct:
+            return 0.0
+        
+        agri_pct = extent_pct.get('agriculture', 0)
+        complex_pct = extent_pct.get('complex_agriculture', 0)
+        forest_pct = extent_pct.get('forest', 0)
+        urban_pct = extent_pct.get('urban', 0)
+        
+        score = 0.0
+        
+        # Score based on how well the location matches bocage characteristics
+        # Only give points when thresholds are actually met
+        if agri_pct > 25:
+            score += min((agri_pct - 25) / 25.0, 1.0) * 25.0  # Points for exceeding agriculture threshold
+        
+        if complex_pct > 10:
+            score += min((complex_pct - 10) / 10.0, 1.0) * 30.0  # Points for exceeding complex agriculture threshold
+        
+        if forest_pct > 15:
+            score += min((forest_pct - 15) / 15.0, 1.0) * 25.0  # Points for exceeding forest threshold
+        
+        if urban_pct < 60:
+            score += (60 - urban_pct) / 60.0 * 20.0  # Points for not being urban dominated
+        
+        return min(score, 100.0)
+    
+    def _score_open_countryside(self, longitude: float, latitude: float, gdf) -> float:
+        """Score open countryside characteristics using multi-scale analysis."""
+        multi_scale_data = self._multi_scale_analysis(longitude, latitude, gdf, [1.0, 2.0])
+        
+        score = 0.0
+        
+        for scale, data in multi_scale_data.items():
+            agri_pct = data.get('agriculture', 0)
+            complex_pct = data.get('complex_agriculture', 0)
+            forest_pct = data.get('forest', 0)
+            urban_pct = data.get('urban', 0)
+            
+            total_agri = agri_pct + complex_pct
+            
+            # Open countryside indicators
+            agri_score = min(total_agri / 60.0, 1.0) * 40.0  # 60%+ total agriculture
+            urban_penalty = max(0, urban_pct / 5.0) * 30.0  # Penalty for urban presence
+            forest_penalty = max(0, (forest_pct - 30.0) / 30.0) * 20.0  # Penalty for too much forest
+            complex_penalty = max(0, (complex_pct - 35.0) / 35.0) * 10.0  # Penalty for too much complexity
+            
+            scale_score = agri_score - urban_penalty - forest_penalty - complex_penalty
+            
+            # Weight by scale
+            scale_weight = 0.6 if scale == 2.0 else 0.4
+            score += max(0, scale_score) * scale_weight
+        
+        return min(score, 100.0)
+    
+    def _score_transitional_zone(self, longitude: float, latitude: float, gdf) -> float:
+        """Score transitional zone characteristics using multi-scale analysis."""
+        # Use the same logic as the boolean check to ensure consistency
+        if not self._is_enhanced_transitional_zone(longitude, latitude, gdf):
+            return 0.0
+        
+        # If the rule applies, give it a score based on how strongly it applies
+        extent_pct = self._calculate_spatial_extent_percentages(longitude, latitude, gdf, 2.0)
+        
+        if not extent_pct:
+            return 0.0
+        
+        agri_pct = extent_pct.get('agriculture', 0)
+        complex_pct = extent_pct.get('complex_agriculture', 0)
+        forest_pct = extent_pct.get('forest', 0)
+        urban_pct = extent_pct.get('urban', 0)
+        
+        score = 0.0
+        
+        # Score based on how well the location matches transitional zone characteristics
+        # Higher score for mixed patterns with significant complexity
+        if complex_pct >= 10 and urban_pct >= 5:
+            score += 40.0
+        
+        if complex_pct >= 10 and (agri_pct > 20 or forest_pct > 10):
+            score += 30.0
+        
+        if urban_pct >= 40 and urban_pct <= 60 and complex_pct >= 10:
+            score += 30.0
+        
+        return min(score, 100.0)
+    
+    def _score_proximity_urban(self, longitude: float, latitude: float, gdf) -> float:
+        """Score urban proximity using distance-based analysis."""
+        threshold_km = terrain_config_service.get_spatial_parameter('distance_thresholds_km', 'urban_proximity', 3.0)
+        
+        if self._is_near_urban(longitude, latitude, gdf, threshold_km):
+            # Calculate proximity score based on actual distance
+            distance_score = self._calculate_distance_score(longitude, latitude, 'urban', threshold_km)
+            return distance_score
+        
+        return 0.0
+    
+    def _score_proximity_forest(self, longitude: float, latitude: float, gdf) -> float:
+        """Score forest proximity using distance-based analysis."""
+        threshold_km = terrain_config_service.get_spatial_parameter('distance_thresholds_km', 'forest_proximity', 2.0)
+        
+        # Use the same logic as the boolean check for consistency
+        if self._is_near_forest(longitude, latitude, gdf, threshold_km) and self._has_meaningful_forest_agriculture_mix(longitude, latitude, gdf):
+            # Calculate proximity score based on actual distance
+            distance_score = self._calculate_distance_score(longitude, latitude, 'forest', threshold_km)
+            return distance_score
+        
+        return 0.0
+    
+    def _calculate_distance_score(self, longitude: float, latitude: float, category: str, threshold_km: float) -> float:
+        """Calculate distance-based proximity score."""
+        try:
+            point = Point(longitude, latitude)
+            
+            # Get the appropriate pre-filtered data
+            if category == 'urban' and self._urban_areas is not None:
+                areas = self._urban_areas
+            elif category == 'forest' and self._forest_areas is not None:
+                areas = self._forest_areas
+            else:
+                return 0.0
+            
+            # Find nearest feature
+            nearest_distance = float('inf')
+            for _, area in areas.iterrows():
+                try:
+                    distance = point.distance(area.geometry.centroid) * 111.0  # Convert to km
+                    nearest_distance = min(nearest_distance, distance)
+                except:
+                    continue
+            
+            if nearest_distance == float('inf'):
+                return 0.0
+            
+            # Score based on inverse distance (closer = higher score)
+            if nearest_distance <= threshold_km:
+                score = (1.0 - nearest_distance / threshold_km) * 100.0
+                return score
+            
+            return 0.0
+            
+        except Exception as e:
+            logger.debug(f"Error calculating distance score for {category}: {e}")
+            return 0.0
     
     def _apply_classification_rule(self, rule_name: str, rule: dict, terrain_type: str, 
                                  longitude: float, latitude: float, gdf) -> bool:
@@ -236,7 +973,10 @@ class TerrainClassificationService:
             
             elif rule_name == 'proximity_forest':
                 applicable_terrain = rule.get('conditions', {}).get('applicable_to_terrain', ['II'])
-                return terrain_type in applicable_terrain and self._is_near_forest(longitude, latitude, gdf)
+                if terrain_type not in applicable_terrain:
+                    return False
+                # Only apply if there's meaningful forest presence AND agricultural land
+                return self._is_near_forest(longitude, latitude, gdf) and self._has_meaningful_forest_agriculture_mix(longitude, latitude, gdf)
             
             return False
             
@@ -266,6 +1006,94 @@ class TerrainClassificationService:
             return rule.get('conditions', {}).get('target_terrain', 'IIIa')
         
         return terrain_type
+    
+    def _generate_rule_explanation(self, rule_name: str, rule: dict, terrain_type: str, 
+                                   longitude: float, latitude: float, gdf) -> str:
+        """Generate human-readable explanation for why a rule was applied."""
+        try:
+            if rule_name == 'coastal_exposure':
+                extent_data = self._calculate_spatial_extent_percentages(longitude, latitude, gdf, 2.0)
+                coastal_pct = extent_data.get('coastal', 0)
+                urban_pct = extent_data.get('urban', 0)
+                return f"Coastal exposure detected: {coastal_pct:.1f}% coastal, {urban_pct:.1f}% urban in 2km radius"
+            
+            elif rule_name == 'dense_urban':
+                extent_data = self._calculate_spatial_extent_percentages(longitude, latitude, gdf, 2.0)
+                urban_pct = extent_data.get('urban', 0)
+                return f"Dense urban area: {urban_pct:.1f}% urban coverage exceeds threshold"
+            
+            elif rule_name == 'bocage_characteristics':
+                extent_data = self._calculate_spatial_extent_percentages(longitude, latitude, gdf, 2.0)
+                agri_pct = extent_data.get('agriculture', 0) + extent_data.get('complex_agriculture', 0)
+                forest_pct = extent_data.get('forest', 0)
+                return f"Bocage pattern: {agri_pct:.1f}% agriculture, {forest_pct:.1f}% forest indicates rural character"
+            
+            elif rule_name == 'open_countryside':
+                extent_data = self._calculate_spatial_extent_percentages(longitude, latitude, gdf, 2.0)
+                total_agri = extent_data.get('agriculture', 0) + extent_data.get('complex_agriculture', 0)
+                return f"Open countryside: {total_agri:.1f}% total agriculture indicates open terrain"
+            
+            elif rule_name == 'transitional_zone':
+                extent_data = self._calculate_spatial_extent_percentages(longitude, latitude, gdf, 2.0)
+                urban_pct = extent_data.get('urban', 0)
+                complex_pct = extent_data.get('complex_agriculture', 0)
+                return f"Transitional zone: {urban_pct:.1f}% urban, {complex_pct:.1f}% complex agriculture"
+            
+            elif rule_name == 'proximity_urban':
+                # Calculate actual distance to nearest urban area
+                distance = self._calculate_distance_to_category(longitude, latitude, 'urban', gdf)
+                return f"Urban proximity: {distance:.1f}km to nearest urban area"
+            
+            elif rule_name == 'proximity_forest':
+                # Calculate actual distance to nearest forest area
+                distance = self._calculate_distance_to_category(longitude, latitude, 'forest', gdf)
+                return f"Forest proximity: {distance:.1f}km to nearest forest area"
+            
+            return f"Rule '{rule_name}' applied based on spatial analysis"
+            
+        except Exception as e:
+            logger.debug(f"Error generating explanation for rule {rule_name}: {e}")
+            return f"Rule '{rule_name}' applied"
+    
+    def _calculate_distance_to_category(self, longitude: float, latitude: float, category: str, gdf) -> float:
+        """Calculate distance to nearest land use category."""
+        try:
+            # Get category codes from configuration
+            influence = terrain_config_service.get_influence_percentages()
+            spatial_categories = influence.get('spatial_extent_categories', {})
+            
+            category_codes = {
+                'urban': spatial_categories.get('urban', {}).get('codes', []),
+                'forest': spatial_categories.get('forest', {}).get('codes', []),
+                'agriculture': spatial_categories.get('agriculture', {}).get('codes', []),
+                'complex_agriculture': spatial_categories.get('complex_agriculture', {}).get('codes', []),
+                'coastal': spatial_categories.get('coastal', {}).get('codes', [])
+            }
+            
+            codes = category_codes.get(category, [])
+            if not codes:
+                return float('inf')
+            
+            # Filter by category
+            category_polygons = gdf[gdf['Code_18'].isin(codes)]
+            
+            if len(category_polygons) == 0:
+                return float('inf')
+            
+            # Create point geometry
+            point = Point(longitude, latitude)
+            
+            # Calculate minimum distance
+            distances = category_polygons.geometry.distance(point)
+            
+            # Convert to kilometers (approximate)
+            min_distance_deg = distances.min()
+            km_per_deg = 111.0  # Approximate
+            return min_distance_deg * km_per_deg
+            
+        except Exception as e:
+            logger.debug(f"Error calculating distance to {category}: {e}")
+            return float('inf')
     
     def _calculate_spatial_extent_percentages(self, longitude: float, latitude: float, gdf, radius_km: float = 2.0) -> dict:
         """
@@ -529,6 +1357,51 @@ class TerrainClassificationService:
             
         except Exception as e:
             logger.debug(f"Error checking urban proximity: {e}")
+            return False
+    
+    def _has_meaningful_forest_agriculture_mix(self, longitude: float, latitude: float, gdf) -> bool:
+        """
+        Check if there's a meaningful mix of forest and agricultural land that justifies 
+        upgrading from open countryside to bocage/obstacle terrain.
+        
+        Args:
+            longitude: Longitude coordinate
+            latitude: Latitude coordinate
+            gdf: GeoDataFrame with land use data
+            
+        Returns:
+            True if meaningful forest-agriculture mix exists, False otherwise
+        """
+        try:
+            # Get spatial extent percentages
+            extent_pct = self._calculate_spatial_extent_percentages(longitude, latitude, gdf, 2.0)
+            
+            if not extent_pct:
+                return False
+            
+            forest_pct = extent_pct.get('forest', 0)
+            agri_pct = extent_pct.get('agriculture', 0)
+            complex_agri_pct = extent_pct.get('complex_agriculture', 0)
+            
+            # Require very significant forest presence for upgrading agricultural land
+            if forest_pct < 25.0:  # Less than 25% forest coverage
+                return False
+            
+            # Require significant agricultural presence
+            total_agri = agri_pct + complex_agri_pct
+            if total_agri < 40.0:  # Less than 40% agricultural coverage
+                return False
+            
+            # For upgrading agricultural land, require overwhelming forest presence
+            # This ensures we only upgrade when it's truly a mixed/bocage landscape
+            if forest_pct < 45.0:  # Need at least 45% forest to upgrade from pure agriculture
+                return False
+            
+            # Both forest and agriculture should be substantial
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Error checking forest-agriculture mix: {e}")
             return False
     
     def _is_near_forest(self, longitude: float, latitude: float, gdf, threshold_km: float = 2.0) -> bool:
@@ -844,7 +1717,7 @@ class TerrainClassificationService:
     def _is_dense_urban_area(self, longitude: float, latitude: float, gdf, radius_km: float = 2.0) -> bool:
         """
         Check if location is in a dense urban area and should be classified as Terrain IV.
-        This identifies cities and high-density urban zones.
+        This identifies cities and high-density urban zones using spatial extent analysis.
         
         Args:
             longitude: Longitude coordinate
@@ -856,41 +1729,43 @@ class TerrainClassificationService:
             True if dense urban area, False otherwise
         """
         try:
-            # Create point geometry
-            point = Point(longitude, latitude)
+            # Get spatial extent percentages using the existing method
+            extent_pct = self._calculate_spatial_extent_percentages(longitude, latitude, gdf, radius_km)
             
-            # Dense urban codes
-            dense_urban_codes = ['111', '112']  # Continuous and discontinuous urban fabric
-            urban_codes = ['121', '122', '123', '124', '131', '132', '133', '142']  # Other urban
-            
-            # Check urban density in the area
-            lat_rad = math.radians(latitude)
-            km_per_deg_lat = 111.0
-            km_per_deg_lon = 111.0 * math.cos(lat_rad)
-            
-            radius_deg_lat = radius_km / km_per_deg_lat
-            
-            search_area = point.buffer(radius_deg_lat)
-            area_intersects = gdf[gdf.geometry.intersects(search_area)]
-            
-            if len(area_intersects) == 0:
+            if not extent_pct:
                 return False
             
-            # Calculate urban density
-            unique_codes = set(area_intersects['Code_18'].tolist())
-            code_counts = area_intersects['Code_18'].value_counts()
+            # Get thresholds from configuration
+            thresholds = terrain_config_service.get_spatial_analysis_config()
+            dense_urban_threshold = thresholds.get('density_thresholds', {}).get('dense_urban_fabric', 0.35)
+            total_urban_threshold = thresholds.get('density_thresholds', {}).get('total_urban_area', 0.65)
             
-            dense_urban_count = sum(code_counts.get(code, 0) for code in unique_codes & set(dense_urban_codes))
-            total_urban_count = sum(code_counts.get(code, 0) for code in unique_codes & set(urban_codes + dense_urban_codes))
-            total_polygons = len(area_intersects)
+            # Get land use percentages
+            urban_pct = extent_pct.get('urban', 0)
+            agri_pct = extent_pct.get('agriculture', 0)
             
-            # If dense urban fabric dominates (>35% of area), it's a dense urban area
-            if dense_urban_count / total_polygons > 0.35:
+            # Context-aware threshold: if there's significant agriculture, require higher urban density
+            # This prevents discontinuous urban fabric in mixed areas from being classified as dense urban
+            if agri_pct > 40.0:  # More than 40% agriculture
+                # In mixed areas, require much higher urban coverage for dense urban classification
+                if urban_pct < 60.0:  # Need at least 60% urban if agriculture is dominant
+                    return False
+            
+            # Check against configuration thresholds
+            # If urban coverage exceeds total urban threshold, it's a dense urban area
+            if urban_pct > (total_urban_threshold * 100):  # Convert from decimal to percentage
                 return True
             
-            # If total urban area is very high (>65%), it's likely a city
-            if total_urban_count / total_polygons > 0.65:
-                return True
+            # For dense urban fabric specifically, use higher threshold for mixed areas
+            if agri_pct > 20.0:  # Some agricultural presence
+                # Require higher urban threshold when there's any significant agriculture
+                adjusted_threshold = dense_urban_threshold * 1.4  # 35% -> 49%
+                if urban_pct > (adjusted_threshold * 100):
+                    return True
+            else:
+                # Pure urban areas can use the standard threshold
+                if urban_pct > (dense_urban_threshold * 100):  # Convert from decimal to percentage
+                    return True
             
             return False
             
@@ -960,7 +1835,7 @@ class TerrainClassificationService:
             forest_pct = extent_pct.get('forest', 0)
             urban_pct = extent_pct.get('urban', 0)
             
-            # Enhanced logic using spatial extent:
+            # Enhanced logic using spatial extent with proper thresholds:
             # 1. If agriculture dominates (>60%) and urban is very low (<10%), it's open countryside (II)
             if agri_pct > 60 and urban_pct < 10:
                 return False
@@ -969,8 +1844,9 @@ class TerrainClassificationService:
             if agri_pct > 70:
                 return False
             
-            # 3. If complex cultivation + urban elements, it's transitional/bocage (IIIa)
-            if complex_pct > 0 and urban_pct > 0:
+            # 3. Only consider transitional if there's meaningful complexity and urban presence
+            # Changed from >0 to >=10% for complexity and >=5% for urban to avoid false positives
+            if complex_pct >= 10 and urban_pct >= 5:
                 return True
             
             # 4. If mixed patterns with significant complexity, it's transitional (IIIa)
@@ -1099,7 +1975,7 @@ class TerrainClassificationService:
     
     def batch_classify_coordinates(self, coordinates: list) -> list:
         """
-        Classify terrain types for multiple coordinates.
+        Classify terrain types for multiple coordinates with optimized batch processing.
         
         Args:
             coordinates: List of (longitude, latitude) tuples
@@ -1108,10 +1984,180 @@ class TerrainClassificationService:
             List of terrain types corresponding to input coordinates
         """
         results = []
-        for lon, lat in coordinates:
+        start_time = time.time()
+        
+        # Load data once for batch processing
+        gdf = self._load_land_use_data()
+        
+        # Group coordinates by spatial proximity for optimized processing
+        processed_coords = self._batch_optimize_processing(coordinates, gdf)
+        
+        for lon, lat in processed_coords:
             terrain_type = self.get_terrain_type_at_coordinates(lon, lat)
             results.append(terrain_type)
+        
+        processing_time = time.time() - start_time
+        logger.info(f"Batch classified {len(coordinates)} coordinates in {processing_time:.3f}s")
+        
         return results
+    
+    def _batch_optimize_processing(self, coordinates: list, gdf: gpd.GeoDataFrame) -> list:
+        """Optimize batch processing by spatial proximity grouping."""
+        # For now, return coordinates as-is
+        # TODO: Implement spatial clustering for optimization
+        return coordinates
+    
+    def _calculate_spatial_extent_percentages(self, longitude: float, latitude: float, gdf, radius_km: float = 2.0) -> dict:
+        """
+        Calculate land use percentages based on spatial extent (area) with caching.
+        
+        Args:
+            longitude: Longitude coordinate
+            latitude: Latitude coordinate
+            gdf: GeoDataFrame with land use data
+            radius_km: Analysis radius in kilometers
+            
+        Returns:
+            Dictionary with land use category percentages based on spatial extent
+        """
+        # Check cache first
+        cache_key = f"spatial_extent_{longitude:.6f}_{latitude:.6f}_{radius_km:.1f}"
+        cached_result = cache.get(cache_key)
+        if cached_result is not None:
+            return cached_result
+        
+        try:
+            result = self._compute_spatial_extent_percentages(longitude, latitude, gdf, radius_km)
+            
+            # Cache the result
+            cache.set(cache_key, result, self._index_cache_timeout)
+            
+            return result
+            
+        except Exception as e:
+            logger.debug(f"Error calculating spatial extent percentages: {e}")
+            return {}
+    
+    def _compute_spatial_extent_percentages(self, longitude: float, latitude: float, gdf, radius_km: float = 2.0) -> dict:
+        """Compute spatial extent percentages without caching."""
+        # Create point geometry
+        point = Point(longitude, latitude)
+        
+        # Convert radius to degrees
+        lat_rad = math.radians(latitude)
+        km_per_deg_lat = 111.0
+        km_per_deg_lon = 111.0 * math.cos(lat_rad)
+        
+        radius_deg_lat = radius_km / km_per_deg_lat
+        
+        # Create buffer and intersect with land use data
+        search_area = point.buffer(radius_deg_lat)
+        intersects = gdf[gdf.geometry.intersects(search_area)]
+        
+        if len(intersects) == 0:
+            return {}
+        
+        # Calculate actual areas of intersected polygons
+        # Clip polygons to the search area for accurate area calculation
+        clipped_intersects = intersects.copy()
+        clipped_intersects['geometry'] = clipped_intersects.geometry.intersection(search_area)
+        
+        # Reproject to a projected CRS for accurate area calculations
+        # Use appropriate UTM zone for France (Zone 31N for most of France)
+        clipped_intersects['geometry'] = clipped_intersects['geometry'].to_crs('EPSG:32631')
+        
+        # Calculate areas in km² (UTM coordinates are in meters)
+        clipped_intersects['area_km2'] = clipped_intersects.geometry.area / 1_000_000  # m² to km²
+        total_area = clipped_intersects['area_km2'].sum()
+        
+        if total_area == 0:
+            return {}
+        
+        # Get land use categories from configuration
+        influence = terrain_config_service.get_influence_percentages()
+        spatial_categories = influence.get('spatial_extent_categories', {})
+        
+        agri_codes = set(spatial_categories.get('agriculture', {}).get('codes', ['211', '212', '213', '231']))
+        complex_agri = set(spatial_categories.get('complex_agriculture', {}).get('codes', ['241', '242', '243', '244']))
+        forest_codes = set(spatial_categories.get('forest', {}).get('codes', ['311', '312', '313', '321', '322', '323', '324']))
+        urban_codes = set(spatial_categories.get('urban', {}).get('codes', ['111', '112', '121', '122', '123', '124', '131', '132', '133', '142']))
+        true_coastal_codes = set(spatial_categories.get('coastal', {}).get('codes', ['521', '522', '523', '423', '331']))
+        inland_water_codes = set(spatial_categories.get('inland_water', {}).get('codes', ['511', '512']))
+        
+        # Calculate spatial extent percentages by category
+        extent_percentages = {}
+        
+        for category_name, code_set in [
+            ('agriculture', agri_codes),
+            ('complex_agriculture', complex_agri),
+            ('forest', forest_codes),
+            ('urban', urban_codes),
+            ('coastal', true_coastal_codes)
+        ]:
+            category_area = clipped_intersects[
+                clipped_intersects['Code_18'].isin(code_set)
+            ]['area_km2'].sum()
+            
+            extent_percentages[category_name] = (category_area / total_area) * 100
+        
+        return extent_percentages
+    
+    def get_performance_metrics(self) -> dict:
+        """Get performance metrics for monitoring and optimization."""
+        metrics = self._performance_metrics.copy()
+        
+        # Calculate derived metrics
+        total_requests = metrics['cache_hits'] + metrics['cache_misses']
+        cache_hit_rate = metrics['cache_hits'] / total_requests if total_requests > 0 else 0
+        
+        avg_classification_time = np.mean(metrics['classification_time']) if metrics['classification_time'] else 0
+        
+        metrics.update({
+            'cache_hit_rate': round(cache_hit_rate, 3),
+            'avg_classification_time_ms': round(avg_classification_time * 1000, 2),
+            'total_requests': total_requests,
+            'spatial_index_count': len(self._spatial_indexes)
+        })
+        
+        return metrics
+    
+    def reset_performance_metrics(self):
+        """Reset performance metrics for fresh monitoring."""
+        self._performance_metrics = {
+            'cache_hits': 0,
+            'cache_misses': 0,
+            'spatial_queries': 0,
+            'classification_time': []
+        }
+    
+    def clear_cache(self, pattern: str = None):
+        """Clear cache with optional pattern matching."""
+        if pattern:
+            # Clear cache keys matching pattern
+            # Note: This is a simplified implementation
+            cache.delete_many([key for key in cache.keys(pattern) if key.startswith(pattern)])
+        else:
+            # Clear all terrain-related cache
+            cache.delete_many([key for key in cache.keys('terrain_*')])
+            cache.delete_many([key for key in cache.keys('spatial_*')])
+        
+        logger.info(f"Cleared cache{' for pattern: ' + pattern if pattern else ''}")
+    
+    def optimize_memory_usage(self):
+        """Optimize memory usage by clearing unused data and indexes."""
+        current_time = time.time()
+        
+        # Clear old spatial indexes
+        for category, index_data in list(self._spatial_indexes.items()):
+            if current_time - index_data['created_at'] > self._index_cache_timeout:
+                del self._spatial_indexes[category]
+                logger.debug(f"Cleared old spatial index for {category}")
+        
+        # Force garbage collection if needed
+        import gc
+        gc.collect()
+        
+        logger.info("Memory usage optimization completed")
     
     def get_terrain_statistics(self) -> dict:
         """
