@@ -18,6 +18,10 @@ from .vector_tile_parser import create_vector_tile_parser
 
 logger = logging.getLogger(__name__)
 
+# Module-level cache for singleton service instance
+_terrain_service_instance = None
+_service_lock = None
+
 
 class TerrainClassificationService:
     """Service for terrain classification using land use data."""
@@ -42,6 +46,23 @@ class TerrainClassificationService:
             'spatial_queries': 0,
             'classification_time': []
         }
+    
+    @classmethod
+    def get_instance(cls):
+        """Get singleton instance of TerrainClassificationService."""
+        global _terrain_service_instance, _service_lock
+        
+        if _service_lock is None:
+            import threading
+            _service_lock = threading.Lock()
+        
+        if _terrain_service_instance is None:
+            with _service_lock:
+                if _terrain_service_instance is None:
+                    _terrain_service_instance = cls()
+                    logger.info("Created new TerrainClassificationService singleton instance")
+        
+        return _terrain_service_instance
         
     def _load_land_use_data(self):
         """Load land use data from FlatGeobuf file with spatial indexing."""
@@ -1171,7 +1192,7 @@ class TerrainClassificationService:
             logger.debug(f"Error calculating distance to {category}: {e}")
             return float('inf')
     
-    def _calculate_spatial_extent_percentages(self, longitude: float, latitude: float, gdf, radius_km: float = 2.0) -> dict:
+    def _calculate_spatial_extent_percentages(self, longitude: float, latitude: float, gdf, radius_km: float = 1.0) -> dict:
         """
         Calculate land use percentages based on spatial extent (area) instead of polygon counts.
         This provides more accurate classification by considering actual spatial coverage.
@@ -1202,6 +1223,10 @@ class TerrainClassificationService:
             
             if len(intersects) == 0:
                 return {}
+            
+            # Early optimization: if only a few polygons, use simplified calculation
+            if len(intersects) <= 10:
+                return self._fast_spatial_extent_calculation(intersects, search_area)
             
             # Calculate actual areas of intersected polygons
             # Clip polygons to the search area for accurate area calculation
@@ -1250,6 +1275,43 @@ class TerrainClassificationService:
             
         except Exception as e:
             logger.debug(f"Error calculating spatial extent percentages: {e}")
+            return {}
+    
+    def _fast_spatial_extent_calculation(self, intersects: gpd.GeoDataFrame, search_area) -> dict:
+        """
+        Fast spatial extent calculation for simple cases with few polygons.
+        Avoids expensive coordinate transformations for better performance.
+        """
+        try:
+            # Get land use categories from configuration
+            influence = terrain_config_service.get_influence_percentages()
+            spatial_categories = influence.get('spatial_extent_categories', {})
+            
+            agri_codes = set(spatial_categories.get('agriculture', {}).get('codes', ['211', '212', '213', '231']))
+            complex_agri = set(spatial_categories.get('complex_agriculture', {}).get('codes', ['241', '242', '243', '244']))
+            forest_codes = set(spatial_categories.get('forest', {}).get('codes', ['311', '312', '313', '321', '322', '323', '324']))
+            urban_codes = set(spatial_categories.get('urban', {}).get('codes', ['111', '112', '121', '122', '123', '124', '131', '132', '133', '142']))
+            true_coastal_codes = set(spatial_categories.get('coastal', {}).get('codes', ['521', '522', '523', '423', '331']))
+            inland_water_codes = set(spatial_categories.get('inland_water', {}).get('codes', ['511', '512']))
+            
+            # Use simple polygon count approximation for small areas
+            total_polygons = len(intersects)
+            extent_percentages = {}
+            
+            for category_name, code_set in [
+                ('agriculture', agri_codes),
+                ('complex_agriculture', complex_agri),
+                ('forest', forest_codes),
+                ('urban', urban_codes),
+                ('coastal', true_coastal_codes)
+            ]:
+                category_count = len(intersects[intersects['Code_18'].isin(code_set)])
+                extent_percentages[category_name] = (category_count / total_polygons) * 100 if total_polygons > 0 else 0
+            
+            return extent_percentages
+            
+        except Exception as e:
+            logger.debug(f"Error in fast spatial extent calculation: {e}")
             return {}
     
     def _calculate_spatial_influence(self, longitude: float, latitude: float, gdf, land_use_codes: set, radius_km: float = 2.0) -> float:
@@ -2169,7 +2231,7 @@ class TerrainClassificationService:
         # TODO: Implement spatial clustering for optimization
         return coordinates
     
-    def _calculate_spatial_extent_percentages(self, longitude: float, latitude: float, gdf, radius_km: float = 2.0) -> dict:
+    def _calculate_spatial_extent_percentages(self, longitude: float, latitude: float, gdf, radius_km: float = 1.0) -> dict:
         """
         Calculate land use percentages based on spatial extent (area) with caching.
         

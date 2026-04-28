@@ -213,10 +213,10 @@
     },
     "analysis_radii_km": {
       "dispersed_habitat": 1.0,
-      "transitional_zone": 2.0,
-      "dense_urban": 2.0,
-      "dense_urban_coastal": 3.0,
-      "spatial_extent": 2.0
+      "transitional_zone": 1.0,
+      "dense_urban": 1.0,
+      "dense_urban_coastal": 2.0,
+      "spatial_extent": 1.0
     },
     "density_thresholds": {
       "dense_urban_fabric": 0.35,

@@ -3,7 +3,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     AntennaEquipmentViewSet, AntennaSpecificationViewSet, TerrainLoadCalculationViewSet, 
     TerrainClassificationViewSet, GeocodingSearchViewSet, TerrainConfigViewSet, RegionGeoJSONViewSet,
-    terrain_map_view, terrain_classification_api, region_map_view
+    terrain_map_view, terrain_classification_api, terrain_classification_fast_api, region_map_view
 )
 
 router = DefaultRouter()
@@ -22,4 +22,5 @@ urlpatterns = [
     path('terrain-map/', terrain_map_view, name='terrain-map'),
     path('region-map/', region_map_view, name='region-map'),
     path('terrain-classify/', terrain_classification_api, name='terrain-classify'),
+    path('terrain-classify-fast/', terrain_classification_fast_api, name='terrain-classify-fast'),
 ]

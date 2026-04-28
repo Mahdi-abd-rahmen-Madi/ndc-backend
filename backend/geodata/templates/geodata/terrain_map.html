@@ -1845,6 +1845,60 @@
       // Initialize map
       const map = L.map("map").setView([46.6034, 1.8883], 6); // Center of France
 
+      // Debouncing functionality for terrain analysis
+      let terrainAnalysisTimeout = null;
+      let currentAnalysisRequest = null;
+      const DEBOUNCE_DELAY = 300; // 300ms debounce delay
+
+      function debounceTerrainAnalysis(lat, lng) {
+        // Clear any existing timeout
+        if (terrainAnalysisTimeout) {
+          clearTimeout(terrainAnalysisTimeout);
+        }
+        
+        // Cancel any ongoing request
+        if (currentAnalysisRequest) {
+          currentAnalysisRequest.abort();
+          currentAnalysisRequest = null;
+        }
+        
+        // Set new timeout
+        terrainAnalysisTimeout = setTimeout(() => {
+          performTerrainAnalysis(lat, lng);
+        }, DEBOUNCE_DELAY);
+      }
+
+      function performTerrainAnalysis(lat, lng) {
+        // Store coordinates for testing mode
+        updateLastClickedCoordinates(lat, lng);
+
+        // Remove previous marker and click indicator
+        if (currentMarker) {
+          map.removeLayer(currentMarker);
+        }
+        if (currentClickIndicator) {
+          map.removeLayer(currentClickIndicator);
+        }
+
+        // Add click indicator
+        currentClickIndicator = L.divIcon({
+          className: "click-indicator",
+          iconSize: [20, 20],
+          iconAnchor: [10, 10],
+        });
+
+        const clickIndicator = L.marker([lat, lng], {
+          icon: currentClickIndicator,
+        }).addTo(map);
+        currentClickIndicator = clickIndicator;
+
+        // Show loading
+        showLoading();
+
+        // Call fast API for immediate terrain type, then load detailed analysis
+        fetchFastTerrainClassification(lat, lng);
+      }
+
       // Add Google Satellite tile layer
       L.tileLayer("https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}", {
         attribution: "© Google Maps",
@@ -2034,39 +2088,13 @@
         }
       }
 
-      // Handle map clicks
+      // Handle map clicks with debouncing
       map.on("click", function (e) {
         const lat = e.latlng.lat;
         const lng = e.latlng.lng;
-
-        // Store coordinates for testing mode
-        updateLastClickedCoordinates(lat, lng);
-
-        // Remove previous marker and click indicator
-        if (currentMarker) {
-          map.removeLayer(currentMarker);
-        }
-        if (currentClickIndicator) {
-          map.removeLayer(currentClickIndicator);
-        }
-
-        // Add click indicator
-        currentClickIndicator = L.divIcon({
-          className: "click-indicator",
-          iconSize: [20, 20],
-          iconAnchor: [10, 10],
-        });
-
-        const clickIndicator = L.marker([lat, lng], {
-          icon: currentClickIndicator,
-        }).addTo(map);
-        currentClickIndicator = clickIndicator;
-
-        // Show loading
-        showLoading();
-
-        // Call API for terrain classification with configuration
-        fetchTerrainClassificationWithConfig(lat, lng);
+        
+        // Use debounced terrain analysis
+        debounceTerrainAnalysis(lat, lng);
       });
 
       // BDTOPO Control Event Listeners
@@ -2758,6 +2786,10 @@
 
       async function fetchTerrainClassificationWithConfig(lat, lng) {
         try {
+          // Create AbortController for request cancellation
+          const abortController = new AbortController();
+          currentAnalysisRequest = abortController;
+          
           // Get terrain classification with configuration details
           const response = await fetch(
             "/api/geodata/terrain-config/test_coordinates/",
@@ -2772,6 +2804,7 @@
                 latitude: lat,
                 analysis_radius_km: currentAnalysisRadius,
               }),
+              signal: abortController.signal,
             },
           );
 
@@ -2790,26 +2823,28 @@
             // Show configuration tabs and detailed configuration
             showConfigurationInPanel(result);
 
-            // Auto-initialize BDTOPO if building data is available
+            // Auto-initialize BDTOPO if building data is available (deferred for performance)
             if (result.rule_explanations && result.rule_explanations.building_density_verification) {
-              // Initialize BDTOPO if not already done
-              if (!maplibreMap) {
-                initializeMapLibreGL();
-              }
-              
-              // Update building information
-              updateBuildingInfo(result.rule_explanations.building_density_verification);
-              
-              // Show BDTOPO layer and highlight buildings in analysis radius
-              if (maplibreMap) {
-                // Make sure BDTOPO is visible
-                if (!bdtopoVisible) {
-                  showBDTOPO(); // This will set bdtopoVisible = true
+              // Defer BDTOPO initialization to avoid blocking terrain analysis
+              setTimeout(() => {
+                if (!maplibreMap) {
+                  initializeMapLibreGL();
                 }
                 
-                // Highlight buildings in analysis radius
-                highlightBuildingsInRadius(lng, lat, currentAnalysisRadius);
-              }
+                // Update building information
+                updateBuildingInfo(result.rule_explanations.building_density_verification);
+                
+                // Show BDTOPO layer and highlight buildings in analysis radius
+                if (maplibreMap) {
+                  // Make sure BDTOPO is visible
+                  if (!bdtopoVisible) {
+                    showBDTOPO(); // This will set bdtopoVisible = true
+                  }
+                  
+                  // Highlight buildings in analysis radius
+                  highlightBuildingsInRadius(lng, lat, currentAnalysisRadius);
+                }
+              }, 500); // Defer BDTOPO operations by 500ms
             }
 
             // Initialize configuration if not already loaded
@@ -2820,7 +2855,66 @@
             showError(result.error || "Failed to classify terrain");
           }
         } catch (error) {
+          // Handle aborted requests silently
+          if (error.name === 'AbortError') {
+            console.log('Terrain analysis request was cancelled');
+            return;
+          }
           showError("Network error: " + error.message);
+        } finally {
+          // Clear the current request reference
+          currentAnalysisRequest = null;
+        }
+      }
+
+      async function fetchFastTerrainClassification(lat, lng) {
+        try {
+          // Create AbortController for request cancellation
+          const abortController = new AbortController();
+          currentAnalysisRequest = abortController;
+          
+          // Get fast terrain classification for immediate response
+          const response = await fetch("/api/geodata/terrain-classify-fast/", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-CSRFToken": getCookie("csrftoken"),
+            },
+            body: JSON.stringify({
+              latitude: lat,
+              longitude: lng,
+            }),
+            signal: abortController.signal,
+          });
+
+          const result = await response.json();
+
+          if (response.ok) {
+            // Show immediate terrain type
+            const basicData = {
+              terrain_type: result.terrain_type,
+              latitude: result.latitude,
+              longitude: result.longitude,
+            };
+            showTerrainInfo(basicData);
+            
+            // Then load detailed analysis asynchronously
+            setTimeout(() => {
+              fetchTerrainClassificationWithConfig(lat, lng);
+            }, 200);
+          } else {
+            showError(result.error || "Failed to classify terrain");
+          }
+        } catch (error) {
+          // Handle aborted requests silently
+          if (error.name === 'AbortError') {
+            console.log('Fast terrain analysis request was cancelled');
+            return;
+          }
+          showError("Network error: " + error.message);
+        } finally {
+          // Clear the current request reference
+          currentAnalysisRequest = null;
         }
       }
 

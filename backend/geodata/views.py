@@ -470,7 +470,7 @@ class TerrainConfigViewSet(viewsets.ViewSet):
             latitude = float(request.data.get('latitude'))
             
             from .services import TerrainClassificationService
-            terrain_service = TerrainClassificationService()
+            terrain_service = TerrainClassificationService.get_instance()
             
             # Get detailed terrain classification information
             classification_details = terrain_service.get_terrain_classification_details(longitude, latitude)
@@ -981,8 +981,8 @@ def terrain_classification_api(request):
                 status=400
             )
         
-        # Initialize terrain classification service
-        terrain_service = TerrainClassificationService()
+        # Initialize terrain classification service using singleton
+        terrain_service = TerrainClassificationService.get_instance()
         
         # Get terrain type at coordinates
         terrain_type = terrain_service.get_terrain_type_at_coordinates(longitude, latitude)
@@ -1006,6 +1006,46 @@ def terrain_classification_api(request):
             'spatial_extent': spatial_extent,
             'latitude': latitude,
             'longitude': longitude
+        })
+        
+    except ValueError as e:
+        return JsonResponse(
+            {'error': f'Invalid coordinates: {str(e)}'},
+            status=400
+        )
+    except Exception as e:
+        return JsonResponse(
+            {'error': f'Server error: {str(e)}'},
+            status=500
+        )
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def terrain_classification_fast_api(request):
+    """Fast API endpoint for basic terrain classification without detailed analysis"""
+    try:
+        data = json.loads(request.body)
+        latitude = float(data.get('latitude'))
+        longitude = float(data.get('longitude'))
+        
+        if not latitude or not longitude:
+            return JsonResponse(
+                {'error': 'Latitude and longitude are required'},
+                status=400
+            )
+        
+        # Initialize terrain classification service using singleton
+        terrain_service = TerrainClassificationService.get_instance()
+        
+        # Get just the terrain type without spatial analysis for fastest response
+        terrain_type = terrain_service.get_terrain_type_at_coordinates(longitude, latitude)
+        
+        return JsonResponse({
+            'terrain_type': terrain_type,
+            'latitude': latitude,
+            'longitude': longitude,
+            'fast_response': True
         })
         
     except ValueError as e:
